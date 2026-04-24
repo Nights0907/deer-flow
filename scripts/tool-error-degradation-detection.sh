@@ -24,7 +24,7 @@ echo "[INFO] Running tool-failure downgrade detector..."
 
 cd "${BACKEND_DIR}"
 
-uv run python -u - <<'PY'
+uv run python3 -u - <<'PY'
 import asyncio
 import logging
 import ssl

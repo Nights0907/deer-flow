@@ -95,6 +95,90 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
+_AUTO_TEACHER_ASSISTANT_ID = "digital-teacher"
+_TEACHER_KEYWORDS = (
+    "这道题",
+    "这题",
+    "题目",
+    "解题",
+    "求解",
+    "讲题",
+    "讲解一下",
+    "讲解这题",
+    "怎么算",
+    "怎么做",
+    "解一下",
+    "求答案",
+    "错题",
+    "错因",
+    "分析错因",
+    "思路",
+    "步骤",
+    "题图",
+    "辅导",
+    "题",
+)
+
+
+def _extract_latest_user_text(raw_input: dict[str, Any] | None) -> str:
+    if not raw_input:
+        return ""
+    messages = raw_input.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role", msg.get("type", ""))).lower()
+        if role not in {"user", "human"}:
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(parts).strip()
+    return ""
+
+
+def _looks_like_teacher_request(text: str) -> bool:
+    normalized = text.strip().lower()
+    if not normalized:
+        return False
+    if any(keyword in normalized for keyword in _TEACHER_KEYWORDS):
+        return True
+    if len(normalized) <= 24 and any(token in normalized for token in ("=", "+", "-", "×", "÷", "/", "^", "函数", "方程", "几何")):
+        return True
+    if re.search(r"\b(solve|explain|show\s+steps|wrong\s+answer|mistake\s+analysis)\b", normalized):
+        return True
+    if re.search(r"\d+\s*[+\-*/=^]\s*\d+", normalized):
+        return True
+    if re.search(r"[xyzXYZ]\s*[+\-*/=^]", normalized):
+        return True
+    return False
+
+
+def _resolve_assistant_id_for_run(body: Any) -> str | None:
+    assistant_id = getattr(body, "assistant_id", None)
+    if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID:
+        return assistant_id
+
+    request_config = getattr(body, "config", None) or {}
+    configurable = request_config.get("configurable") if isinstance(request_config, dict) else None
+    if isinstance(configurable, dict) and configurable.get("agent_name"):
+        return assistant_id
+
+    latest_text = _extract_latest_user_text(getattr(body, "input", None))
+    if _looks_like_teacher_request(latest_text):
+        return _AUTO_TEACHER_ASSISTANT_ID
+    return assistant_id
 
 
 def resolve_agent_factory(assistant_id: str | None):
@@ -163,6 +247,16 @@ def build_run_config(
             config["configurable"]["agent_name"] = normalized
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
+        if "context" not in config:
+            context = {"thread_id": thread_id}
+            student_id = metadata.get("student_id")
+            if student_id is not None:
+                context["student_id"] = student_id
+            config["context"] = context
+        elif isinstance(config.get("context"), dict):
+            student_id = metadata.get("student_id")
+            if student_id is not None and "student_id" not in config["context"]:
+                config["context"]["student_id"] = student_id
     return config
 
 
@@ -259,11 +353,12 @@ async def start_run(
     store = get_store(request)
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
+    resolved_assistant_id = _resolve_assistant_id_for_run(body)
 
     try:
         record = await run_mgr.create_or_reject(
             thread_id,
-            body.assistant_id,
+            resolved_assistant_id,
             on_disconnect=disconnect,
             metadata=body.metadata or {},
             kwargs={"input": body.input, "config": body.config},
@@ -280,9 +375,9 @@ async def start_run(
     if store is not None:
         await _upsert_thread_in_store(store, thread_id, body.metadata)
 
-    agent_factory = resolve_agent_factory(body.assistant_id)
+    agent_factory = resolve_agent_factory(resolved_assistant_id)
     graph_input = normalize_input(body.input)
-    config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+    config = build_run_config(thread_id, body.config, body.metadata, assistant_id=resolved_assistant_id)
 
     # Merge DeerFlow-specific context overrides into configurable.
     # The ``context`` field is a custom extension for the langgraph-compat layer

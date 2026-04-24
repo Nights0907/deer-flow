@@ -156,6 +156,97 @@ def test_resolve_agent_factory_returns_make_lead_agent():
     assert resolve_agent_factory("custom-agent-123") is make_lead_agent
 
 
+def test_extract_latest_user_text_prefers_last_user_message():
+    from app.gateway.services import _extract_latest_user_text
+
+    text = _extract_latest_user_text(
+        {
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "user", "content": "请讲解这道题的步骤"},
+            ]
+        }
+    )
+
+    assert text == "请讲解这道题的步骤"
+
+
+def test_looks_like_teacher_request_for_chinese_problem_text():
+    from app.gateway.services import _looks_like_teacher_request
+
+    assert _looks_like_teacher_request("请讲解这道题的步骤") is True
+
+
+def test_looks_like_teacher_request_for_formula_text():
+    from app.gateway.services import _looks_like_teacher_request
+
+    assert _looks_like_teacher_request("2x+3=7") is True
+
+
+def test_looks_like_teacher_request_false_for_regular_chat():
+    from app.gateway.services import _looks_like_teacher_request
+
+    assert _looks_like_teacher_request("今天上海天气怎么样") is False
+
+
+def test_resolve_assistant_id_for_run_auto_routes_teacher_request():
+    from types import SimpleNamespace
+
+    from app.gateway.services import _resolve_assistant_id_for_run
+
+    body = SimpleNamespace(
+        assistant_id=None,
+        config=None,
+        input={"messages": [{"role": "user", "content": "帮我讲解这道题的思路"}]},
+    )
+
+    assert _resolve_assistant_id_for_run(body) == "digital-teacher"
+
+
+def test_resolve_assistant_id_for_run_keeps_explicit_assistant():
+    from types import SimpleNamespace
+
+    from app.gateway.services import _resolve_assistant_id_for_run
+
+    body = SimpleNamespace(
+        assistant_id="custom-agent",
+        config=None,
+        input={"messages": [{"role": "user", "content": "帮我讲解这道题的思路"}]},
+    )
+
+    assert _resolve_assistant_id_for_run(body) == "custom-agent"
+
+
+def test_resolve_assistant_id_for_run_keeps_explicit_agent_name_in_configurable():
+    from types import SimpleNamespace
+
+    from app.gateway.services import _resolve_assistant_id_for_run
+
+    body = SimpleNamespace(
+        assistant_id="lead_agent",
+        config={"configurable": {"agent_name": "manual-agent"}},
+        input={"messages": [{"role": "user", "content": "帮我讲解这道题的思路"}]},
+    )
+
+    assert _resolve_assistant_id_for_run(body) == "lead_agent"
+
+
+def test_resolve_assistant_id_for_run_does_not_route_plain_student_context():
+    from types import SimpleNamespace
+
+    from app.gateway.services import _resolve_assistant_id_for_run
+
+    body = SimpleNamespace(
+        assistant_id=None,
+        config=None,
+        input={"messages": [{"role": "user", "content": "你好"}]},
+        metadata={"student_id": "stu-1"},
+    )
+
+    assert _resolve_assistant_id_for_run(body) is None
+
+
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------

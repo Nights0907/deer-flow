@@ -108,6 +108,15 @@ Boundary check (harness → app import firewall):
 
 CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 
+Digital teacher integration is scaffolded through:
+- global tool registration in `config.example.yaml` under the `teacher` tool group
+- custom agent config in `backend/.deer-flow/agents/digital-teacher/config.yaml`
+- custom agent persona in `backend/.deer-flow/agents/digital-teacher/SOUL.md`
+- model-backed teacher tools in `packages/harness/deerflow/tools/teacher_tools.py`; `solve_problem` now does core solving first and then concurrently enriches diagnostics (`knowledges`, `error_analysis`, `weak_*`) via separate model calls, while `evaluate_student_explanation` provides structured Feynman-style explanation assessment
+- local mirrored student profile markdown files in `backend/.deer-flow/students/{student_id}/PROFILE.md`
+- teaching strategy stays in the digital-teacher skills/SOUL layer: guided questioning, personalized explanation pacing, and when to use similar-problem practice or explanation evaluation
+- `app/gateway/services.py` now contains a lightweight rule-based auto-router that sends default-assistant problem-solving requests to `digital-teacher` while preserving explicit `assistant_id` / `configurable.agent_name` selections
+
 ## Architecture
 
 ### Harness / App Split
@@ -345,6 +354,10 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 - **User Context**: `workContext`, `personalContext`, `topOfMind` (1-3 sentence summaries)
 - **History**: `recentMonths`, `earlierContext`, `longTermBackground`
 - **Facts**: Discrete facts with `id`, `content`, `category` (preference/knowledge/context/behavior/goal), `confidence` (0-1), `createdAt`, `source`
+
+**Digital Teacher scaffolding**:
+- Student teaching profiles can be stored separately from DeerFlow memory as markdown summaries under `backend/.deer-flow/students/{student_id}/PROFILE.md`
+- The `digital-teacher` custom assistant is expected to read/update these markdown summaries via custom tools rather than changing the built-in memory pipeline
 
 **Workflow**:
 1. `MemoryMiddleware` filters messages (user inputs + final AI responses) and queues conversation

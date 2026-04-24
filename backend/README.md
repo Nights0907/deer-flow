@@ -129,6 +129,40 @@ FastAPI application providing REST endpoints for frontend integration:
 | `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
 
+### Digital Teacher Integration Scaffolding
+
+The backend can be extended with a custom `digital-teacher` assistant that orchestrates:
+
+- HTTP-based teacher APIs for solving, OCR, profile sync, and similar-problem recommendation
+- student profile markdown summaries stored under `.deer-flow/students/{student_id}/PROFILE.md`
+- a dedicated custom agent at `.deer-flow/agents/digital-teacher/`
+- teaching workflows delivered as custom skills under `skills/custom/`
+
+Recommended request metadata/context fields for this integration:
+
+- `student_id` - used to load and update the student's markdown profile summary
+- optional `subject` / `grade` hints - forwarded to teacher tools when present
+
+Current model-backed teacher tool expectation:
+
+- Teacher tools now call DeerFlow-configured models directly via `create_chat_model(...)`
+- Optional environment variable aliases:
+  - `DEER_FLOW_TEACHER_MODEL`
+  - `DEER_FLOW_TEACHER_SOLVE_MODEL`
+  - `DEER_FLOW_TEACHER_RECOMMEND_MODEL`
+  - `DEER_FLOW_TEACHER_OCR_MODEL`
+  - `DEER_FLOW_TEACHER_EVALUATE_EXPLANATION_MODEL`
+- `solve_problem` handles reusable solving capability and separates core solving (`answer`, `steps`, `explanation`) from concurrent diagnostic enrichment (`knowledges`, `error_analysis`, `weak_*`)
+- `evaluate_student_explanation` provides structured Feynman-style understanding checks (`gap_type`, misconception, remediation, follow-up question, and profile update hints)
+- `ocr_problem_image` requires a vision-capable configured model alias
+- `recommend_similar_problems` returns normalized recommendation items
+- `sync_student_profile` now validates/reuses the local markdown summary instead of fetching a remote profile
+- Guided questioning, personalized explanation strategy, and when to trigger Feynman checks remain in the digital-teacher skills/SOUL layer rather than in the tools themselves
+
+The initial scaffolding keeps DeerFlow's main memory/runtime flow unchanged and treats the student profile as a parallel markdown-based context source.
+
+Gateway-side auto routing now keeps the original chat UI unchanged: when a request comes through the default assistant path but the latest user message clearly looks like a problem-solving / explanation request, `app/gateway/services.py` automatically resolves that run to `digital-teacher`. Explicit `assistant_id` or explicit `configurable.agent_name` still take precedence and are never overwritten.
+
 ### IM Channels
 
 The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram still use the final `runs.wait()` response path, while Feishu now streams through `runs.stream(["messages-tuple", "values"])` and updates a single in-thread card in place.

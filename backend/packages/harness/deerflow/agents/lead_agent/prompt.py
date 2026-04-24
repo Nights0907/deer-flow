@@ -607,6 +607,17 @@ def get_agent_soul(agent_name: str | None) -> str:
     return ""
 
 
+def get_student_profile_prompt_section(agent_name: str | None) -> str:
+    if agent_name != "digital-teacher":
+        return ""
+    return """
+<student_profile_system>
+When metadata/context contains a student_id, prioritize reading the student's markdown summary via the `read_student_profile` tool before giving personalized tutoring, Feynman checks, guided questioning, or similar-problem recommendations.
+If no student profile exists yet, continue normally and create/update it later using `update_student_profile` when you learn stable weak knowledge points, weak ability points, or learning preferences.
+</student_profile_system>
+"""
+
+
 def get_deferred_tools_prompt_section() -> str:
     """Generate <available-deferred-tools> block for the system prompt.
 
@@ -702,6 +713,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
 
     # Get skills section
     skills_section = get_skills_prompt_section(available_skills)
+    student_profile_section = get_student_profile_prompt_section(agent_name)
 
     # Get deferred tools section (tool_search)
     deferred_tools_section = get_deferred_tools_prompt_section()
@@ -715,7 +727,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
         soul=get_agent_soul(agent_name),
-        skills_section=skills_section,
+        skills_section=skills_section + student_profile_section,
         deferred_tools_section=deferred_tools_section,
         memory_context=memory_context,
         subagent_section=subagent_section,

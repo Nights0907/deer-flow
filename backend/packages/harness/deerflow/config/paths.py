@@ -134,6 +134,19 @@ class Paths:
         """Per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
         return self.agent_dir(name) / "memory.json"
 
+    @property
+    def students_dir(self) -> Path:
+        """Root directory for student profile summaries: `{base_dir}/students/`."""
+        return self.base_dir / "students"
+
+    def student_dir(self, student_id: str) -> Path:
+        """Directory for a specific student profile summary: `{base_dir}/students/{student_id}/`."""
+        return self.students_dir / _validate_thread_id(student_id)
+
+    def student_profile_md_file(self, student_id: str) -> Path:
+        """Student profile summary file: `{base_dir}/students/{student_id}/PROFILE.md`."""
+        return self.student_dir(student_id) / "PROFILE.md"
+
     def thread_dir(self, thread_id: str) -> Path:
         """
         Host path for a thread's data: `{base_dir}/threads/{thread_id}/`

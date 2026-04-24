@@ -66,6 +66,37 @@ models:
   #   max_tokens: 4096
   #   temperature: 0.7
   #   supports_vision: true # Enable vision support for view_image tool
+  #
+  # Example: teacher tool aliases (optional)
+  # These aliases can be selected by setting:
+  #   DEER_FLOW_TEACHER_MODEL
+  #   DEER_FLOW_TEACHER_SOLVE_MODEL
+  #   DEER_FLOW_TEACHER_RECOMMEND_MODEL
+  #   DEER_FLOW_TEACHER_OCR_MODEL
+  #   DEER_FLOW_TEACHER_EVALUATE_EXPLANATION_MODEL
+  # - name: teacher-solver
+  #   display_name: Teacher Solver
+  #   use: langchain_openai:ChatOpenAI
+  #   model: gpt-4.1
+  #   api_key: $OPENAI_API_KEY
+  #   temperature: 0.2
+  #   supports_vision: false
+  #
+  # - name: teacher-recommender
+  #   display_name: Teacher Recommender
+  #   use: langchain_openai:ChatOpenAI
+  #   model: gpt-4.1-mini
+  #   api_key: $OPENAI_API_KEY
+  #   temperature: 0.4
+  #   supports_vision: false
+  #
+  # - name: teacher-ocr
+  #   display_name: Teacher OCR Vision
+  #   use: langchain_openai:ChatOpenAI
+  #   model: gpt-4.1
+  #   api_key: $OPENAI_API_KEY
+  #   temperature: 0.0
+  #   supports_vision: true
 
   # Example: OpenAI Responses API model
   # - name: gpt-5-responses
@@ -335,6 +366,7 @@ tool_groups:
   - name: file:read
   - name: file:write
   - name: bash
+  - name: teacher
 
 # ============================================================================
 # Tools Configuration
@@ -445,6 +477,35 @@ tools:
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
+
+  # Digital teacher tools
+  - name: solve_problem
+    group: teacher
+    use: deerflow.tools.teacher_tools:solve_problem_tool
+
+  - name: read_student_profile
+    group: teacher
+    use: deerflow.tools.teacher_tools:read_student_profile_tool
+
+  - name: update_student_profile
+    group: teacher
+    use: deerflow.tools.teacher_tools:update_student_profile_tool
+
+  - name: sync_student_profile
+    group: teacher
+    use: deerflow.tools.teacher_tools:sync_student_profile_tool
+
+  - name: recommend_similar_problems
+    group: teacher
+    use: deerflow.tools.teacher_tools:recommend_similar_problems_tool
+
+  - name: ocr_problem_image
+    group: teacher
+    use: deerflow.tools.teacher_tools:ocr_problem_image_tool
+
+  - name: evaluate_student_explanation
+    group: teacher
+    use: deerflow.tools.teacher_tools:evaluate_student_explanation_tool
 
 # ============================================================================
 # Tool Search Configuration (Deferred Tool Loading)
