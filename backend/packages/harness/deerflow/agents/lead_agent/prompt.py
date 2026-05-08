@@ -636,15 +636,29 @@ def get_agent_soul(agent_name: str | None) -> str:
     return ""
 
 
-def get_student_profile_prompt_section(agent_name: str | None) -> str:
+def get_student_profile_prompt_section(agent_name: str | None, student_id: str | None = None) -> str:
     if agent_name != "digital-teacher":
         return ""
-    return """
-<student_profile_system>
-When metadata/context contains a student_id, prioritize reading the student's markdown summary via the `read_student_profile` tool before giving personalized tutoring, Feynman checks, guided questioning, or similar-problem recommendations.
-If no student profile exists yet, continue normally and create/update it later using `update_student_profile` when you learn stable weak knowledge points, weak ability points, or learning preferences.
-</student_profile_system>
-"""
+    profile_markdown = ""
+    if student_id:
+        from deerflow.teacher_profile import read_student_profile_summary
+
+        profile_markdown = read_student_profile_summary(student_id)
+    profile_block = (
+        f"\n<student_profile_l0>\n{profile_markdown}\n</student_profile_l0>\n"
+        if profile_markdown
+        else ""
+    )
+    return (
+        "\n<student_profile_system>\n"
+        "L0 student profile is the markdown file at backend/.deer-flow/students/{student_id}/PROFILE.md. "
+        "Use the injected L0 profile as the primary personalization context for explanation depth, pacing, emphasis, and practice focus. "
+        "If no injected profile is present, you may read the student's markdown summary via the `read_student_profile` tool when metadata/context contains a student_id. "
+        "If no student profile exists yet, continue normally and create/update it later using `update_student_profile` when you learn stable weak knowledge points, weak ability points, or learning preferences.\n"
+        f"student_id: {student_id or ''}\n"
+        f"{profile_block}"
+        "</student_profile_system>\n"
+    )
 
 
 def get_deferred_tools_prompt_section() -> str:
@@ -714,7 +728,7 @@ def _build_custom_mounts_section() -> str:
     return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
 
 
-def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
+def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, student_id: str | None = None, available_skills: set[str] | None = None) -> str:
     # Get memory context
     memory_context = _get_memory_context(agent_name)
 
@@ -742,7 +756,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
 
     # Get skills section
     skills_section = get_skills_prompt_section(available_skills)
-    student_profile_section = get_student_profile_prompt_section(agent_name)
+    student_profile_section = get_student_profile_prompt_section(agent_name, student_id)
 
     # Get deferred tools section (tool_search)
     deferred_tools_section = get_deferred_tools_prompt_section()

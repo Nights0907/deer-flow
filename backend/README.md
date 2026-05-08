@@ -134,13 +134,13 @@ FastAPI application providing REST endpoints for frontend integration:
 The backend can be extended with a custom `digital-teacher` assistant that orchestrates:
 
 - HTTP-based teacher APIs for solving, OCR, profile sync, and similar-problem recommendation
-- student profile markdown summaries stored under `.deer-flow/students/{student_id}/PROFILE.md`
+- student profile markdown summaries stored under `.deer-flow/students/{student_id}/PROFILE.md`, now normalized into a structured cumulative markdown profile
 - a dedicated custom agent at `.deer-flow/agents/digital-teacher/`
 - teaching workflows delivered as custom skills under `skills/custom/`
 
 Recommended request metadata/context fields for this integration:
 
-- `student_id` - used to load and update the student's markdown profile summary
+- `student_id` - used to load and update the student's markdown profile summary; when omitted, teacher persistence currently falls back to default sid `522025320226` for MySQL basic-record writes
 - optional `subject` / `grade` hints - forwarded to teacher tools when present
 
 Current model-backed teacher tool expectation:
@@ -152,16 +152,63 @@ Current model-backed teacher tool expectation:
   - `DEER_FLOW_TEACHER_RECOMMEND_MODEL`
   - `DEER_FLOW_TEACHER_OCR_MODEL`
   - `DEER_FLOW_TEACHER_EVALUATE_EXPLANATION_MODEL`
-- `solve_problem` handles reusable solving capability and separates core solving (`answer`, `steps`, `explanation`) from concurrent diagnostic enrichment (`knowledges`, `error_analysis`, `weak_*`)
+- `solve_problem` handles reusable solving capability and separates core solving (`answer`, `steps`, `explanation`) from concurrent diagnostic enrichment (`knowledges`, `error_analysis`, `weak_*`); after generation it persists generated-problem basic fields to MySQL `question_basic_info` (`qid`, `sid`, `content`, `type`, `date`, `subject`, `knowledgeType`), detailed fields to MongoDB (answer, steps, explanation, knowledges plus archive metadata), and automatically merges math observations into the local student markdown profile
+- student profiles are now rendered as canonical markdown with cumulative `Weak Knowledge`, cumulative `Weak Ability`, manual-only `Learning Preferences`, bounded `Recent Sessions`, plus derived `Math Archive Summary` and `Archived Math Problems`; old markdown profiles are auto-migrated on next read/write
+- local archive/profile mutation is math-scoped: subjects like `math`, `mathematics`, and `数学` update the local student archive automatically, while non-math subjects keep DB persistence but do not rewrite the local math archive
+- `knowledgeType` now stores only the first/core knowledge point instead of the full knowledge-point list
+- persistence now writes `qid` explicitly as the current system-time millisecond timestamp, so it remains compatible even if an existing local `question_basic_info` table was created without `AUTO_INCREMENT` on `qid`
+- persistence auto-creates the MySQL table and MongoDB indexes on first write, enables both MySQL and Mongo by default for local development, and accepts either the `DEER_FLOW_TEACHER_*` env names or common fallback names like `MYSQL_*`, `MONGODB_*`, and `MONGO_*`
 - `evaluate_student_explanation` provides structured Feynman-style understanding checks (`gap_type`, misconception, remediation, follow-up question, and profile update hints)
 - `ocr_problem_image` requires a vision-capable configured model alias
 - `recommend_similar_problems` returns normalized recommendation items
 - `sync_student_profile` now validates/reuses the local markdown summary instead of fetching a remote profile
 - Guided questioning, personalized explanation strategy, and when to trigger Feynman checks remain in the digital-teacher skills/SOUL layer rather than in the tools themselves
 
+MySQL DDL for generated problem basic records:
+
+```sql
+CREATE TABLE IF NOT EXISTS question_basic_info (
+    qid BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    sid VARCHAR(128) NULL,
+    content TEXT NOT NULL,
+    type VARCHAR(64) NULL,
+    date DATETIME(6) NOT NULL,
+    subject VARCHAR(64) NULL,
+    knowledgeType TEXT NULL,
+    PRIMARY KEY (qid),
+    KEY idx_sid_date (sid, date),
+    KEY idx_subject (subject)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+```
+
+`knowledgeType` stores only the first/core item from `knowledges` as a single text value.
+
+MongoDB document shape for generated problem details in `teacher_problem_details`:
+
+```json
+{
+  "_id": "ObjectId",
+  "qid": 123,
+  "question": "解方程 2x + 3 = 7",
+  "answer": "x = 2",
+  "explanation": "先消去常数项，再消去系数。",
+  "steps": [
+    "两边同时减去 3，得到 2x = 4",
+    "两边同时除以 2，得到 x = 2"
+  ],
+  "knowledges": ["一元一次方程", "等式性质"]
+}
+```
+
+Recommended MongoDB indexes:
+
+```javascript
+db.teacher_problem_details.createIndex({ qid: 1 }, { unique: true, sparse: true })
+```
+
 The initial scaffolding keeps DeerFlow's main memory/runtime flow unchanged and treats the student profile as a parallel markdown-based context source.
 
-Gateway-side auto routing now keeps the original chat UI unchanged: when a request comes through the default assistant path but the latest user message clearly looks like a problem-solving / explanation request, `app/gateway/services.py` automatically resolves that run to `digital-teacher`. Explicit `assistant_id` or explicit `configurable.agent_name` still take precedence and are never overwritten.
+Automatic teacher routing keeps the original chat UI unchanged across both runtime paths: `app/gateway/services.py` handles Gateway-mode HTTP runs, and `packages/harness/deerflow/agents/lead_agent/agent.py` now resolves the same rule on the standard LangGraph runtime used by `make dev` before agent construction, so digital-teacher prompt, skills, and `teacher` tool groups are loaded at creation time. Explicit `assistant_id` or explicit `configurable.agent_name` still take precedence and are never overwritten.
 
 ### IM Channels
 

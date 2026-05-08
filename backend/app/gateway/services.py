@@ -354,6 +354,16 @@ async def start_run(
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
     resolved_assistant_id = _resolve_assistant_id_for_run(body)
+    latest_user_text = _extract_latest_user_text(getattr(body, "input", None))
+    logger.info(
+        "run routing resolved: thread_id=%s requested_assistant_id=%r resolved_assistant_id=%r explicit_agent_name=%r auto_teacher_routed=%s latest_user_text=%r",
+        thread_id,
+        body.assistant_id,
+        resolved_assistant_id,
+        ((body.config or {}).get("configurable", {}) if isinstance(body.config, dict) else {}).get("agent_name"),
+        resolved_assistant_id == _AUTO_TEACHER_ASSISTANT_ID and body.assistant_id in (None, _DEFAULT_ASSISTANT_ID),
+        latest_user_text[:200],
+    )
 
     try:
         record = await run_mgr.create_or_reject(

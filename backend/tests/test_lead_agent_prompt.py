@@ -68,6 +68,26 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
 
 
+def test_apply_prompt_template_inlines_l0_profile_for_digital_teacher(monkeypatch):
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills"),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda: "")
+    monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr("deerflow.teacher_profile.read_student_profile_summary", lambda student_id: "# Student Profile: stu-1\n\n## Weak Knowledge\n- fractions")
+
+    prompt = prompt_module.apply_prompt_template(agent_name="digital-teacher", student_id="stu-1")
+
+    assert "<student_profile_l0>" in prompt
+    assert "# Student Profile: stu-1" in prompt
+    assert "fractions" in prompt
+
+
 def test_refresh_skills_system_prompt_cache_async_reloads_immediately(monkeypatch, tmp_path):
     def make_skill(name: str) -> Skill:
         skill_dir = tmp_path / name

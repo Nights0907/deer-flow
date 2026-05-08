@@ -36,6 +36,63 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
 
+const DEFAULT_ASSISTANT_ID = "lead_agent";
+const DIGITAL_TEACHER_ASSISTANT_ID = "digital-teacher";
+const TEACHER_KEYWORDS = [
+  "这道题",
+  "这题",
+  "题目",
+  "解题",
+  "求解",
+  "讲题",
+  "讲解",
+  "怎么做",
+  "怎么算",
+  "步骤",
+  "错因",
+  "错题",
+  "方程",
+  "几何",
+  "函数",
+  "solve",
+  "show steps",
+  "explain this problem",
+  "wrong answer",
+  "mistake analysis",
+];
+
+function looksLikeTeacherRequest(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (TEACHER_KEYWORDS.some((keyword) => normalized.includes(keyword))) {
+    return true;
+  }
+  if (normalized.length <= 24 && /[=+\-*/^]/.test(normalized)) {
+    return true;
+  }
+  if (/\d+\s*[+\-*/=^]\s*\d+/.test(normalized)) {
+    return true;
+  }
+  if (/[xyz]\s*[+\-*/=^]/i.test(normalized)) {
+    return true;
+  }
+  return false;
+}
+
+function resolveAssistantIdForMessage(
+  text: string,
+  context: ThreadStreamOptions["context"],
+): string {
+  if (context.agent_name) {
+    return DEFAULT_ASSISTANT_ID;
+  }
+  return looksLikeTeacherRequest(text)
+    ? DIGITAL_TEACHER_ASSISTANT_ID
+    : DEFAULT_ASSISTANT_ID;
+}
+
 function normalizeStoredRunId(runId: string | null): string | null {
   if (!runId) {
     return null;
@@ -190,6 +247,7 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+  const assistantIdRef = useRef(DEFAULT_ASSISTANT_ID);
   const runMetadataStorageRef = useRef<
     ReturnType<typeof getRunMetadataStorage> | undefined
   >(undefined);
@@ -203,7 +261,7 @@ export function useThreadStream({
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
-    assistantId: "lead_agent",
+    assistantId: context.agent_name ? DEFAULT_ASSISTANT_ID : assistantIdRef.current,
     threadId: onStreamThreadId,
     reconnectOnMount: runMetadataStorageRef.current
       ? () => runMetadataStorageRef.current!
@@ -459,6 +517,8 @@ export function useThreadStream({
             status: "uploaded" as const,
           }),
         );
+
+        assistantIdRef.current = resolveAssistantIdForMessage(text, { ...context, ...extraContext });
 
         await thread.submit(
           {

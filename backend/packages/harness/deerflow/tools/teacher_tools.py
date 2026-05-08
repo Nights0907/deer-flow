@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 from typing import Any
 
@@ -8,9 +9,12 @@ from pydantic import BaseModel, ValidationError
 
 from deerflow.config import get_app_config
 from deerflow.models import create_chat_model
+from deerflow.teacher_persistence import persist_safely_async
 from deerflow.teacher_profile import (
-    build_student_profile_markdown,
+    parse_student_profile_markdown,
     read_student_profile_summary,
+    render_student_profile_markdown,
+    update_student_profile_manual,
     write_student_profile_summary,
 )
 
@@ -19,6 +23,8 @@ _SOLVE_MODEL_ENV = "DEER_FLOW_TEACHER_SOLVE_MODEL"
 _RECOMMEND_MODEL_ENV = "DEER_FLOW_TEACHER_RECOMMEND_MODEL"
 _OCR_MODEL_ENV = "DEER_FLOW_TEACHER_OCR_MODEL"
 _EVALUATE_EXPLANATION_MODEL_ENV = "DEER_FLOW_TEACHER_EVALUATE_EXPLANATION_MODEL"
+
+logger = logging.getLogger(__name__)
 
 
 class SolveCoreResult(BaseModel):
@@ -38,6 +44,11 @@ class SolveErrorAnalysisResult(BaseModel):
 class SolveWeakPointsResult(BaseModel):
     weak_knowledge_candidates: list[str] = []
     weak_ability_candidates: list[str] = []
+
+
+class SolveClassificationResult(BaseModel):
+    problem_type: str | None = None
+    difficulty: str | None = None
 
 
 class RecommendedProblem(BaseModel):
@@ -138,10 +149,7 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 def _build_student_profile_context(student_id: str | None) -> str:
     if not student_id:
         return ""
-    summary = read_student_profile_summary(student_id)
-    if not summary:
-        return "No student profile markdown is available yet."
-    return summary
+    return f"student_profile_l0_is_injected_in_system_prompt: true\nstudent_id: {student_id}"
 
 
 async def _invoke_json_tool(model_name: str | None, system_instruction: str, user_prompt: str) -> tuple[dict[str, Any] | None, str]:
@@ -175,9 +183,9 @@ def _solve_knowledges_system_instruction() -> str:
 
 def _solve_error_analysis_system_instruction() -> str:
     return (
-        "You analyze the likely mistake in a student's work. "
+        "You analyze the likely mistake a student may make on this problem. "
         "Return strict JSON only with key: error_analysis. "
-        "If there is no wrong_input or no clear mistake pattern, set error_analysis to null."
+        "If there is no clear mistake pattern from the problem context, set error_analysis to null."
     )
 
 
@@ -189,21 +197,29 @@ def _solve_weak_points_system_instruction() -> str:
     )
 
 
-def _build_solve_context_prompt(question: str, student_id: str | None, wrong_input: str | None, image_url: str | None, subject: str | None, grade: str | None) -> str:
+def _solve_classification_system_instruction() -> str:
+    return (
+        "You classify an educational problem into a broad problem_type and an approximate difficulty. "
+        "Return strict JSON only with keys: problem_type, difficulty. "
+        "problem_type should be a short label like calculation, equation, geometry, reading_comprehension, or experiment_analysis. "
+        "difficulty should be a short label like easy, medium, or hard."
+    )
+
+
+def _build_solve_context_prompt(question: str, student_id: str | None, image_url: str | None, subject: str | None, grade: str | None) -> str:
     profile_context = _build_student_profile_context(student_id)
     return (
         f"student_id: {student_id or 'unknown'}\n"
         f"subject: {subject or ''}\n"
         f"grade: {grade or ''}\n"
         f"image_url: {image_url or ''}\n"
-        f"wrong_input: {wrong_input or ''}\n"
         f"question:\n{question}\n\n"
         f"student_profile_markdown:\n{profile_context}\n"
     )
 
 
-def _build_solve_core_prompt(question: str, student_id: str | None, wrong_input: str | None, image_url: str | None, subject: str | None, grade: str | None) -> str:
-    return _build_solve_context_prompt(question, student_id, wrong_input, image_url, subject, grade)
+def _build_solve_core_prompt(question: str, student_id: str | None, image_url: str | None, subject: str | None, grade: str | None) -> str:
+    return _build_solve_context_prompt(question, student_id, image_url, subject, grade)
 
 
 def _build_solve_knowledges_prompt(
@@ -212,13 +228,12 @@ def _build_solve_knowledges_prompt(
     steps: list[str],
     explanation: str,
     student_id: str | None,
-    wrong_input: str | None,
     image_url: str | None,
     subject: str | None,
     grade: str | None,
 ) -> str:
     return (
-        _build_solve_context_prompt(question, student_id, wrong_input, image_url, subject, grade)
+        _build_solve_context_prompt(question, student_id, image_url, subject, grade)
         + "\ncore_solution:\n"
         + json.dumps({"answer": answer, "steps": steps, "explanation": explanation}, ensure_ascii=False)
     )
@@ -230,13 +245,12 @@ def _build_solve_error_analysis_prompt(
     steps: list[str],
     explanation: str,
     student_id: str | None,
-    wrong_input: str | None,
     image_url: str | None,
     subject: str | None,
     grade: str | None,
 ) -> str:
     return (
-        _build_solve_context_prompt(question, student_id, wrong_input, image_url, subject, grade)
+        _build_solve_context_prompt(question, student_id, image_url, subject, grade)
         + "\ncore_solution:\n"
         + json.dumps({"answer": answer, "steps": steps, "explanation": explanation}, ensure_ascii=False)
     )
@@ -248,13 +262,36 @@ def _build_solve_weak_points_prompt(
     steps: list[str],
     explanation: str,
     student_id: str | None,
-    wrong_input: str | None,
     image_url: str | None,
     subject: str | None,
     grade: str | None,
 ) -> str:
     return (
-        _build_solve_context_prompt(question, student_id, wrong_input, image_url, subject, grade)
+        _build_solve_context_prompt(question, student_id, image_url, subject, grade)
+        + "\ncore_solution:\n"
+        + json.dumps(
+            {
+                "answer": answer,
+                "steps": steps,
+                "explanation": explanation,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def _build_solve_classification_prompt(
+    question: str,
+    answer: str,
+    steps: list[str],
+    explanation: str,
+    student_id: str | None,
+    image_url: str | None,
+    subject: str | None,
+    grade: str | None,
+) -> str:
+    return (
+        _build_solve_context_prompt(question, student_id, image_url, subject, grade)
         + "\ncore_solution:\n"
         + json.dumps(
             {
@@ -306,7 +343,6 @@ def _build_evaluate_student_explanation_prompt(
     question: str,
     student_explanation: str,
     student_id: str | None,
-    wrong_input: str | None,
     image_url: str | None,
     subject: str | None,
     grade: str | None,
@@ -316,7 +352,7 @@ def _build_evaluate_student_explanation_prompt(
     reference_knowledges: list[str] | None,
 ) -> str:
     return (
-        _build_solve_context_prompt(question, student_id, wrong_input, image_url, subject, grade)
+        _build_solve_context_prompt(question, student_id, image_url, subject, grade)
         + "\nstudent_explanation:\n"
         + (student_explanation or "")
         + "\n\nreference_solution:\n"
@@ -357,7 +393,6 @@ async def _run_solve_core(
     model_name: str | None,
     question: str,
     student_id: str | None,
-    wrong_input: str | None,
     image_url: str | None,
     subject: str | None,
     grade: str | None,
@@ -365,7 +400,7 @@ async def _run_solve_core(
     payload_data, raw_text = await _invoke_json_tool(
         model_name,
         _solve_core_system_instruction(),
-        _build_solve_core_prompt(question, student_id, wrong_input, image_url, subject, grade),
+        _build_solve_core_prompt(question, student_id, image_url, subject, grade),
     )
     if payload_data is None:
         raise ValueError("model did not return valid JSON")
@@ -377,7 +412,6 @@ async def _run_solve_knowledges(
     question: str,
     core: SolveCoreResult,
     student_id: str | None,
-    wrong_input: str | None,
     image_url: str | None,
     subject: str | None,
     grade: str | None,
@@ -385,7 +419,7 @@ async def _run_solve_knowledges(
     payload_data, raw_text = await _invoke_json_tool(
         model_name,
         _solve_knowledges_system_instruction(),
-        _build_solve_knowledges_prompt(question, core.answer, core.steps, core.explanation, student_id, wrong_input, image_url, subject, grade),
+        _build_solve_knowledges_prompt(question, core.answer, core.steps, core.explanation, student_id, image_url, subject, grade),
     )
     if payload_data is None:
         raise ValueError("model did not return valid JSON")
@@ -398,7 +432,6 @@ async def _run_solve_error_analysis(
     question: str,
     core: SolveCoreResult,
     student_id: str | None,
-    wrong_input: str | None,
     image_url: str | None,
     subject: str | None,
     grade: str | None,
@@ -406,7 +439,7 @@ async def _run_solve_error_analysis(
     payload_data, raw_text = await _invoke_json_tool(
         model_name,
         _solve_error_analysis_system_instruction(),
-        _build_solve_error_analysis_prompt(question, core.answer, core.steps, core.explanation, student_id, wrong_input, image_url, subject, grade),
+        _build_solve_error_analysis_prompt(question, core.answer, core.steps, core.explanation, student_id, image_url, subject, grade),
     )
     if payload_data is None:
         raise ValueError("model did not return valid JSON")
@@ -419,7 +452,6 @@ async def _run_solve_weak_points(
     question: str,
     core: SolveCoreResult,
     student_id: str | None,
-    wrong_input: str | None,
     image_url: str | None,
     subject: str | None,
     grade: str | None,
@@ -433,7 +465,6 @@ async def _run_solve_weak_points(
             core.steps,
             core.explanation,
             student_id,
-            wrong_input,
             image_url,
             subject,
             grade,
@@ -444,11 +475,38 @@ async def _run_solve_weak_points(
     return SolveWeakPointsResult.model_validate(payload_data), payload_data or raw_text
 
 
+async def _run_solve_classification(
+    model_name: str | None,
+    question: str,
+    core: SolveCoreResult,
+    student_id: str | None,
+    image_url: str | None,
+    subject: str | None,
+    grade: str | None,
+) -> tuple[SolveClassificationResult, Any]:
+    payload_data, raw_text = await _invoke_json_tool(
+        model_name,
+        _solve_classification_system_instruction(),
+        _build_solve_classification_prompt(
+            question,
+            core.answer,
+            core.steps,
+            core.explanation,
+            student_id,
+            image_url,
+            subject,
+            grade,
+        ),
+    )
+    if payload_data is None:
+        raise ValueError("model did not return valid JSON")
+    return SolveClassificationResult.model_validate(payload_data), payload_data or raw_text
+
+
 @tool("solve_problem", parse_docstring=True)
 async def solve_problem_tool(
     question: str,
     student_id: str | None = None,
-    wrong_input: str | None = None,
     image_url: str | None = None,
     subject: str | None = None,
     grade: str | None = None,
@@ -458,14 +516,13 @@ async def solve_problem_tool(
     Args:
         question: The problem text. For image-based questions, pass the user question or OCR text.
         student_id: Optional student identifier for personalization and tracing.
-        wrong_input: Optional wrong answer or wrong solution provided by the student.
         image_url: Optional uploaded image URL or externally accessible file URL for image-based questions.
         subject: Optional subject hint.
         grade: Optional grade hint.
     """
     model_name = _get_teacher_model_name(_SOLVE_MODEL_ENV)
     try:
-        core, core_raw = await _run_solve_core(model_name, question, student_id, wrong_input, image_url, subject, grade)
+        core, core_raw = await _run_solve_core(model_name, question, student_id, image_url, subject, grade)
     except (ValidationError, ValueError) as exc:
         return {
             "status": "error",
@@ -489,14 +546,16 @@ async def solve_problem_tool(
             "weak_ability_candidates": [],
         }
 
-    knowledges_task = _run_solve_knowledges(model_name, question, core, student_id, wrong_input, image_url, subject, grade)
-    error_analysis_task = _run_solve_error_analysis(model_name, question, core, student_id, wrong_input, image_url, subject, grade)
-    weak_points_task = _run_solve_weak_points(model_name, question, core, student_id, wrong_input, image_url, subject, grade)
+    knowledges_task = _run_solve_knowledges(model_name, question, core, student_id, image_url, subject, grade)
+    error_analysis_task = _run_solve_error_analysis(model_name, question, core, student_id, image_url, subject, grade)
+    weak_points_task = _run_solve_weak_points(model_name, question, core, student_id, image_url, subject, grade)
+    classification_task = _run_solve_classification(model_name, question, core, student_id, image_url, subject, grade)
 
-    knowledges_result, error_analysis_result, weak_points_result = await asyncio.gather(
+    knowledges_result, error_analysis_result, weak_points_result, classification_result = await asyncio.gather(
         knowledges_task,
         error_analysis_task,
         weak_points_task,
+        classification_task,
         return_exceptions=True,
     )
 
@@ -518,13 +577,23 @@ async def solve_problem_tool(
         weak_knowledge_candidates = weak_points.weak_knowledge_candidates
         weak_ability_candidates = weak_points.weak_ability_candidates
 
-    return {
+    problem_type: str | None = None
+    difficulty: str | None = None
+    classification_raw: Any = None
+    if not isinstance(classification_result, Exception):
+        classification, classification_raw = classification_result
+        problem_type = classification.problem_type
+        difficulty = classification.difficulty
+
+    result = {
         "status": "ok",
         "answer": core.answer,
         "steps": core.steps,
         "explanation": core.explanation,
         "knowledges": knowledges,
         "error_analysis": error_analysis,
+        "problem_type": problem_type,
+        "difficulty": difficulty,
         "weak_knowledge_candidates": weak_knowledge_candidates,
         "weak_ability_candidates": weak_ability_candidates,
         "raw": {
@@ -532,8 +601,42 @@ async def solve_problem_tool(
             "knowledges": knowledges_raw,
             "error_analysis": error_analysis_raw,
             "weak_points": weak_points_raw,
+            "classification": classification_raw,
         },
     }
+    logger.info(
+        "solve_problem generated result: student_id=%r subject=%r grade=%r answer=%r steps=%s knowledges=%s error_analysis=%r weak_knowledge_candidates=%s weak_ability_candidates=%s",
+        student_id,
+        subject,
+        grade,
+        result["answer"][:200],
+        json.dumps(result["steps"], ensure_ascii=False),
+        json.dumps(result["knowledges"], ensure_ascii=False),
+        result["error_analysis"][:200] if isinstance(result["error_analysis"], str) else result["error_analysis"],
+        json.dumps(result["weak_knowledge_candidates"], ensure_ascii=False),
+        json.dumps(result["weak_ability_candidates"], ensure_ascii=False),
+    )
+    persistence, persistence_error = await persist_safely_async(
+        question=question,
+        student_id=student_id,
+        image_url=image_url,
+        subject=subject,
+        grade=grade,
+        result=result,
+    )
+    if persistence is not None:
+        result["persistence"] = persistence
+        logger.info(
+            "solve_problem persistence succeeded: student_id=%r problem_id=%s problem_detail_id=%s student_profile_path=%r",
+            student_id,
+            persistence.get("problem_id"),
+            persistence.get("problem_detail_id"),
+            persistence.get("student_profile_path"),
+        )
+    elif persistence_error:
+        result["persistence_error"] = persistence_error
+        logger.warning("solve_problem persistence failed: student_id=%r error=%s", student_id, persistence_error)
+    return result
 
 
 @tool("read_student_profile", parse_docstring=True)
@@ -563,14 +666,13 @@ def update_student_profile_tool(
         preferences: Learning preferences or tutoring preferences.
         recent_summary: Short summary of the latest learning observations.
     """
-    markdown = build_student_profile_markdown(
+    path = update_student_profile_manual(
         student_id,
         weak_knowledge=weak_knowledge,
         weak_ability=weak_ability,
         preferences=preferences,
         recent_summary=recent_summary,
     )
-    path = write_student_profile_summary(student_id, markdown)
     return {"status": "ok", "path": str(path)}
 
 
@@ -584,7 +686,8 @@ async def sync_student_profile_tool(student_id: str) -> dict[str, Any]:
     markdown = read_student_profile_summary(student_id)
     if not markdown:
         return {"status": "empty", "message": "No local student profile markdown exists yet."}
-    path = write_student_profile_summary(student_id, markdown)
+    profile = parse_student_profile_markdown(student_id, markdown)
+    path = write_student_profile_summary(student_id, render_student_profile_markdown(profile))
     return {"status": "ok", "path": str(path)}
 
 
@@ -711,8 +814,7 @@ async def evaluate_student_explanation_tool(
                 question,
                 student_explanation,
                 student_id,
-                wrong_input,
-                image_url,
+                    image_url,
                 subject,
                 grade,
                 reference_answer,

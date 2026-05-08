@@ -112,10 +112,28 @@ Digital teacher integration is scaffolded through:
 - global tool registration in `config.example.yaml` under the `teacher` tool group
 - custom agent config in `backend/.deer-flow/agents/digital-teacher/config.yaml`
 - custom agent persona in `backend/.deer-flow/agents/digital-teacher/SOUL.md`
-- model-backed teacher tools in `packages/harness/deerflow/tools/teacher_tools.py`; `solve_problem` now does core solving first and then concurrently enriches diagnostics (`knowledges`, `error_analysis`, `weak_*`) via separate model calls, while `evaluate_student_explanation` provides structured Feynman-style explanation assessment
-- local mirrored student profile markdown files in `backend/.deer-flow/students/{student_id}/PROFILE.md`
+- model-backed teacher tools in `packages/harness/deerflow/tools/teacher_tools.py`; `solve_problem` now does core solving first, then concurrently enriches diagnostics (`knowledges`, `error_analysis`, `weak_*`), and finally persists generated-problem basic fields to MySQL `question_basic_info` (`qid`, `sid`, `content`, `type`, `date`, `subject`, `knowledgeType` as the first/core knowledge point), detailed payloads to MongoDB (answer, steps, explanation, knowledges plus archive metadata), plus automatically merges math-only results into the local markdown student profile through `packages/harness/deerflow/teacher_persistence.py`; persistence auto-creates the MySQL table and MongoDB indexes on write, defaults both MySQL and Mongo to enabled for local development, accepts both `DEER_FLOW_TEACHER_*` env names and common fallback names (`MYSQL_*`, `MONGODB_*`, `MONGO_*`), and now writes `qid` explicitly as the current system-time millisecond timestamp so existing local tables without `AUTO_INCREMENT` on `qid` still work; `packages/harness/deerflow/teacher_profile.py` now parses legacy profile markdown, renders canonical cumulative markdown, keeps manual preferences separate from automatic observations, stores only the most recent 8 sessions / top 10 weak items, and adds derived `Math Archive Summary` / `Archived Math Problems` sections for fully automatic math archive updates; `evaluate_student_explanation` provides structured Feynman-style explanation assessment
+- local mirrored student profile markdown files in `backend/.deer-flow/students/{student_id}/PROFILE.md`, now maintained as structured cumulative markdown
+- when `student_id` is missing, teacher persistence falls back to default sid `522025320226` so MySQL `question_basic_info.sid` remains populated
 - teaching strategy stays in the digital-teacher skills/SOUL layer: guided questioning, personalized explanation pacing, and when to use similar-problem practice or explanation evaluation
-- `app/gateway/services.py` now contains a lightweight rule-based auto-router that sends default-assistant problem-solving requests to `digital-teacher` while preserving explicit `assistant_id` / `configurable.agent_name` selections
+- `app/gateway/services.py` contains Gateway-mode teacher routing for embedded runtime requests, while `packages/harness/deerflow/agents/lead_agent/agent.py` applies the same rule-based auto-routing on the standard LangGraph runtime path before agent construction so real `make dev` chats load digital-teacher prompt, skills, and `teacher` tool groups; explicit `assistant_id` / `configurable.agent_name` selections still win
+- MySQL table expected by `packages/harness/deerflow/teacher_persistence.py`:
+  ```sql
+  CREATE TABLE IF NOT EXISTS question_basic_info (
+      qid BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      sid VARCHAR(128) NULL,
+      content TEXT NOT NULL,
+      type VARCHAR(64) NULL,
+      date DATETIME(6) NOT NULL,
+      subject VARCHAR(64) NULL,
+      knowledgeType TEXT NULL,
+      PRIMARY KEY (qid),
+      KEY idx_sid_date (sid, date),
+      KEY idx_subject (subject)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  ```
+  `knowledgeType` stores only the first/core item from `knowledges` as a single text value.
+- MongoDB collection expected by `packages/harness/deerflow/teacher_persistence.py`: `teacher_problem_details`, with fields `qid`, `question`, `answer`, `explanation`, `steps`, `knowledges`; recommended index is `{ qid: 1 }` unique+sparse
 
 ## Architecture
 

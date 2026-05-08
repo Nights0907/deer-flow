@@ -1,8 +1,11 @@
 "use client";
 
+import { GraduationCap, PlusSquare } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { Button } from "@/components/ui/button";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
   ChatBox,
@@ -20,6 +23,7 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
+import { Tooltip } from "@/components/workspace/tooltip";
 import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
@@ -32,6 +36,7 @@ import { cn } from "@/lib/utils";
 
 export default function ChatPage() {
   const { t } = useI18n();
+  const router = useRouter();
   const [showFollowups, setShowFollowups] = useState(false);
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
@@ -105,6 +110,28 @@ export default function ChatPage() {
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
             <div className="flex items-center gap-2">
+              <Tooltip content="Digital Teacher">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    router.push("/workspace/agents/digital-teacher/chats/new");
+                  }}
+                >
+                  <GraduationCap className="size-4" /> Digital Teacher
+                </Button>
+              </Tooltip>
+              <Tooltip content={t.agents.newChat}>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    router.push("/workspace/chats/new");
+                  }}
+                >
+                  <PlusSquare className="size-4" /> {t.agents.newChat}
+                </Button>
+              </Tooltip>
               <TokenUsageIndicator
                 enabled={tokenUsageEnabled}
                 messages={thread.messages}

@@ -55,3 +55,6 @@ def test_digital_teacher_soul_loads():
 
     assert soul is not None
     assert "digital teacher" in soul.lower()
+    assert "Every new problem-solving request must call `solve_problem`" in soul
+    assert "read the student's profile first" in soul
+    assert "use the tool result as the default source of truth" in soul

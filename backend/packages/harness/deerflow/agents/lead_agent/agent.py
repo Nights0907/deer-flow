@@ -1,7 +1,10 @@
 import logging
+import re
+from typing import Any
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
@@ -9,6 +12,7 @@ from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.runtime_agent_routing_middleware import RuntimeAgentRoutingMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
@@ -24,6 +28,99 @@ from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_AGENT_NAME = "lead_agent"
+_AUTO_TEACHER_AGENT_NAME = "digital-teacher"
+_TEACHER_KEYWORDS = (
+    "这道题",
+    "这题",
+    "题目",
+    "解题",
+    "求解",
+    "讲题",
+    "讲解一下",
+    "讲解这题",
+    "怎么算",
+    "怎么做",
+    "解一下",
+    "求答案",
+    "错题",
+    "错因",
+    "分析错因",
+    "思路",
+    "步骤",
+    "题图",
+    "辅导",
+    "题",
+)
+
+
+def _extract_latest_user_text(messages: list[Any] | None) -> str:
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if not isinstance(message, HumanMessage):
+            continue
+        content = message.content
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(parts).strip()
+    return ""
+
+
+def _looks_like_teacher_request(text: str) -> bool:
+    normalized = text.strip().lower()
+    if not normalized:
+        return False
+    if any(keyword in normalized for keyword in _TEACHER_KEYWORDS):
+        return True
+    if len(normalized) <= 24 and any(token in normalized for token in ("=", "+", "-", "×", "÷", "/", "^", "函数", "方程", "几何")):
+        return True
+    if re.search(r"\b(solve|explain|show\s+steps|wrong\s+answer|mistake\s+analysis)\b", normalized):
+        return True
+    if re.search(r"\d+\s*[+\-*/=^]\s*\d+", normalized):
+        return True
+    if re.search(r"[xyzXYZ]\s*[+\-*/=^]", normalized):
+        return True
+    return False
+
+
+def _resolve_latest_user_text(config: RunnableConfig) -> str:
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    raw_input = config.get("input") if isinstance(config, dict) else None
+    latest_user_text = _extract_latest_user_text(raw_input.get("messages") if isinstance(raw_input, dict) else None)
+    if latest_user_text:
+        return latest_user_text
+    fallback_text = configurable.get("_latest_user_text")
+    return fallback_text.strip() if isinstance(fallback_text, str) else ""
+
+
+
+def _resolve_runtime_agent_name(config: RunnableConfig) -> str | None:
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    requested_agent_name = validate_agent_name(configurable.get("agent_name"))
+    if requested_agent_name and requested_agent_name != _DEFAULT_AGENT_NAME:
+        return requested_agent_name
+
+    latest_user_text = _resolve_latest_user_text(config)
+    if _looks_like_teacher_request(latest_user_text):
+        logger.info(
+            "Runtime pre-create auto-routing resolved: requested_agent_name=%r resolved_agent_name=%r latest_user_text=%r",
+            requested_agent_name,
+            _AUTO_TEACHER_AGENT_NAME,
+            latest_user_text[:200],
+        )
+        return _AUTO_TEACHER_AGENT_NAME
+    return requested_agent_name
 
 
 def _resolve_model_name(requested_model_name: str | None = None) -> str:
@@ -243,6 +340,8 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware())
 
+    middlewares.append(RuntimeAgentRoutingMiddleware())
+
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware(agent_name=agent_name))
 
@@ -291,7 +390,8 @@ def make_lead_agent(config: RunnableConfig):
     subagent_enabled = cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
-    agent_name = validate_agent_name(cfg.get("agent_name"))
+    agent_name = _resolve_runtime_agent_name(config)
+    student_id = cfg.get("student_id") or config.get("metadata", {}).get("student_id") or config.get("context", {}).get("student_id")
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
@@ -342,7 +442,7 @@ def make_lead_agent(config: RunnableConfig):
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
             tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
             middleware=_build_middlewares(config, model_name=model_name),
-            system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
+            system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, student_id=student_id, available_skills=set(["bootstrap"])),
             state_schema=ThreadState,
         )
 
@@ -352,7 +452,11 @@ def make_lead_agent(config: RunnableConfig):
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
         system_prompt=apply_prompt_template(
-            subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None
+            subagent_enabled=subagent_enabled,
+            max_concurrent_subagents=max_concurrent_subagents,
+            agent_name=agent_name,
+            student_id=student_id,
+            available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
         ),
         state_schema=ThreadState,
     )
