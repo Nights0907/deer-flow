@@ -86,6 +86,7 @@ def test_apply_prompt_template_inlines_l0_profile_for_digital_teacher(monkeypatc
     assert "<student_profile_l0>" in prompt
     assert "# Student Profile: stu-1" in prompt
     assert "fractions" in prompt
+    assert "similar to a prior question recorded in Recent Sessions" in prompt
 
 
 def test_refresh_skills_system_prompt_cache_async_reloads_immediately(monkeypatch, tmp_path):

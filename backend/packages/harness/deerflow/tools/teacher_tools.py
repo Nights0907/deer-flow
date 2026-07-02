@@ -9,7 +9,9 @@ from pydantic import BaseModel, ValidationError
 
 from deerflow.config import get_app_config
 from deerflow.models import create_chat_model
-from deerflow.teacher_persistence import persist_safely_async
+from deerflow.teacher_knowledge import KNOWLEDGE_DETAIL_MAP, MATH_KNOWLEDGE_TYPES
+from deerflow.teacher_metadata import ABILITY_TAGS, ERROR_TAGS, METHOD_TAGS, normalize_ability_tags, normalize_error_tags, normalize_method_tags, normalize_stage
+from deerflow.teacher_persistence import normalize_difficulty, normalize_knowledge_pair, normalize_knowledge_tags, normalize_problem_type, normalize_subject, persist_safely_async, retrieve_similar_problems
 from deerflow.teacher_profile import (
     parse_student_profile_markdown,
     read_student_profile_summary,
@@ -49,6 +51,16 @@ class SolveWeakPointsResult(BaseModel):
 class SolveClassificationResult(BaseModel):
     problem_type: str | None = None
     difficulty: str | None = None
+    knowledge_type: str | None = None
+    knowledge_detail: str | None = None
+    stage: str | None = None
+    ability_tags: list[str] = []
+    method_tags: list[str] = []
+    error_tags: list[str] = []
+
+
+class SolveSubjectResult(BaseModel):
+    subject: str | None = None
 
 
 class RecommendedProblem(BaseModel):
@@ -189,6 +201,14 @@ def _solve_error_analysis_system_instruction() -> str:
     )
 
 
+def _solve_subject_system_instruction() -> str:
+    return (
+        "You classify the subject of an educational problem. "
+        "Return strict JSON only with key: subject. "
+        "subject must be Chinese only and must be one of: 数学, 语文, 英语, 物理, 化学, 生物."
+    )
+
+
 def _solve_weak_points_system_instruction() -> str:
     return (
         "You infer likely weak knowledge points and weak abilities from a student's problem-solving context. "
@@ -197,12 +217,29 @@ def _solve_weak_points_system_instruction() -> str:
     )
 
 
+def _format_knowledge_taxonomy_for_prompt() -> str:
+    lines: list[str] = []
+    for knowledge_type in MATH_KNOWLEDGE_TYPES:
+        details = "；".join(KNOWLEDGE_DETAIL_MAP.get(knowledge_type, ()))
+        lines.append(f"- {knowledge_type}: {details}")
+    return "\n".join(lines)
+
+
 def _solve_classification_system_instruction() -> str:
     return (
-        "You classify an educational problem into a broad problem_type and an approximate difficulty. "
-        "Return strict JSON only with keys: problem_type, difficulty. "
-        "problem_type should be a short label like calculation, equation, geometry, reading_comprehension, or experiment_analysis. "
-        "difficulty should be a short label like easy, medium, or hard."
+        "You classify an educational problem into problem metadata for a structured teaching problem bank. "
+        "Return strict JSON only with keys: problem_type, difficulty, knowledge_type, knowledge_detail, stage, ability_tags, method_tags, error_tags. "
+        "problem_type must be Chinese only and must be one of: 单选, 多选, 填空, 大题. "
+        "difficulty must be Chinese only and must be one of: 简单, 中等, 困难. "
+        "stage must be Chinese only and must be one of: 小学, 初中, 高中. "
+        "ability_tags, method_tags, and error_tags must be arrays chosen only from the fixed tag sets below. "
+        "knowledge_type and knowledge_detail must be Chinese only, never English, never pinyin. "
+        "You must choose knowledge_type and knowledge_detail from the following fixed Chinese taxonomy. "
+        "If no exact item fits, choose the closest Chinese item from the taxonomy instead of inventing a new term.\n\n"
+        f"Ability tags: {'、'.join(ABILITY_TAGS)}\n"
+        f"Method tags: {'、'.join(METHOD_TAGS)}\n"
+        f"Error tags: {'、'.join(ERROR_TAGS)}\n\n"
+        f"Knowledge taxonomy:\n{_format_knowledge_taxonomy_for_prompt()}"
     )
 
 
@@ -240,6 +277,23 @@ def _build_solve_knowledges_prompt(
 
 
 def _build_solve_error_analysis_prompt(
+    question: str,
+    answer: str,
+    steps: list[str],
+    explanation: str,
+    student_id: str | None,
+    image_url: str | None,
+    subject: str | None,
+    grade: str | None,
+) -> str:
+    return (
+        _build_solve_context_prompt(question, student_id, image_url, subject, grade)
+        + "\ncore_solution:\n"
+        + json.dumps({"answer": answer, "steps": steps, "explanation": explanation}, ensure_ascii=False)
+    )
+
+
+def _build_solve_subject_prompt(
     question: str,
     answer: str,
     steps: list[str],
@@ -310,6 +364,20 @@ def _recommend_system_instruction() -> str:
         "Return strict JSON only with keys: items, message. "
         "items must be an array of objects with keys: title, question, practice_objective, similarity."
     )
+
+
+def _build_recommendation_item(problem: dict[str, Any]) -> dict[str, str]:
+    title = str(problem.get("problem_type") or problem.get("knowledge_type") or f"题目 {problem.get('qid')}").strip()
+    knowledge_detail = str(problem.get("knowledge_detail") or "").strip()
+    difficulty = str(problem.get("difficulty") or "").strip()
+    practice_bits = [bit for bit in [knowledge_detail, f"难度 {difficulty}" if difficulty else ""] if bit]
+    similarity_bits = [bit for bit in [problem.get("knowledge_type"), knowledge_detail, difficulty] if bit]
+    return {
+        "title": title,
+        "question": str(problem.get("question") or ""),
+        "practice_objective": "巩固" + "，".join(practice_bits) if practice_bits else "巩固同类题型方法",
+        "similarity": str(problem.get("recommend_reason") or ("同类练习：" + " / ".join(str(bit) for bit in similarity_bits) if similarity_bits else "同类知识点与题型")),
+    }
 
 
 def _build_recommend_prompt(question: str, student_id: str | None, knowledges: list[str] | None) -> str:
@@ -447,6 +515,26 @@ async def _run_solve_error_analysis(
     return parsed.error_analysis, payload_data or raw_text
 
 
+async def _run_solve_subject(
+    model_name: str | None,
+    question: str,
+    core: SolveCoreResult,
+    student_id: str | None,
+    image_url: str | None,
+    subject: str | None,
+    grade: str | None,
+) -> tuple[str | None, Any]:
+    payload_data, raw_text = await _invoke_json_tool(
+        model_name,
+        _solve_subject_system_instruction(),
+        _build_solve_subject_prompt(question, core.answer, core.steps, core.explanation, student_id, image_url, subject, grade),
+    )
+    if payload_data is None:
+        raise ValueError("model did not return valid JSON")
+    parsed = SolveSubjectResult.model_validate(payload_data)
+    return normalize_subject(parsed.subject), payload_data or raw_text
+
+
 async def _run_solve_weak_points(
     model_name: str | None,
     question: str,
@@ -520,6 +608,7 @@ async def solve_problem_tool(
         subject: Optional subject hint.
         grade: Optional grade hint.
     """
+    subject = normalize_subject(subject)
     model_name = _get_teacher_model_name(_SOLVE_MODEL_ENV)
     try:
         core, core_raw = await _run_solve_core(model_name, question, student_id, image_url, subject, grade)
@@ -548,26 +637,33 @@ async def solve_problem_tool(
 
     knowledges_task = _run_solve_knowledges(model_name, question, core, student_id, image_url, subject, grade)
     error_analysis_task = _run_solve_error_analysis(model_name, question, core, student_id, image_url, subject, grade)
+    subject_task = _run_solve_subject(model_name, question, core, student_id, image_url, subject, grade)
     weak_points_task = _run_solve_weak_points(model_name, question, core, student_id, image_url, subject, grade)
     classification_task = _run_solve_classification(model_name, question, core, student_id, image_url, subject, grade)
 
-    knowledges_result, error_analysis_result, weak_points_result, classification_result = await asyncio.gather(
+    knowledges_result, error_analysis_result, subject_result, weak_points_result, classification_result = await asyncio.gather(
         knowledges_task,
         error_analysis_task,
+        subject_task,
         weak_points_task,
         classification_task,
         return_exceptions=True,
     )
 
+    raw_knowledges: list[str] = []
     knowledges: list[str] = []
     knowledges_raw: Any = None
     if not isinstance(knowledges_result, Exception):
-        knowledges, knowledges_raw = knowledges_result
+        raw_knowledges, knowledges_raw = knowledges_result
 
     error_analysis: str | None = None
     error_analysis_raw: Any = None
     if not isinstance(error_analysis_result, Exception):
         error_analysis, error_analysis_raw = error_analysis_result
+
+    subject_raw: Any = None
+    if not isinstance(subject_result, Exception):
+        subject, subject_raw = subject_result
 
     weak_knowledge_candidates: list[str] = []
     weak_ability_candidates: list[str] = []
@@ -579,11 +675,25 @@ async def solve_problem_tool(
 
     problem_type: str | None = None
     difficulty: str | None = None
+    knowledge_type: str | None = None
+    knowledge_detail: str | None = None
+    stage: str | None = None
+    ability_tags: list[str] = []
+    method_tags: list[str] = []
+    error_tags: list[str] = []
     classification_raw: Any = None
     if not isinstance(classification_result, Exception):
         classification, classification_raw = classification_result
-        problem_type = classification.problem_type
-        difficulty = classification.difficulty
+        problem_type = normalize_problem_type(classification.problem_type)
+        difficulty = normalize_difficulty(classification.difficulty)
+        stage = normalize_stage(classification.stage, grade)
+        ability_tags = normalize_ability_tags(classification.ability_tags)
+        method_tags = normalize_method_tags(classification.method_tags)
+        error_tags = normalize_error_tags(classification.error_tags)
+        knowledge_type, knowledge_detail, knowledges = normalize_knowledge_tags(classification.knowledge_type, classification.knowledge_detail, raw_knowledges)
+    else:
+        stage = normalize_stage(None, grade)
+        knowledge_type, knowledge_detail, knowledges = normalize_knowledge_tags(None, None, raw_knowledges)
 
     result = {
         "status": "ok",
@@ -594,12 +704,19 @@ async def solve_problem_tool(
         "error_analysis": error_analysis,
         "problem_type": problem_type,
         "difficulty": difficulty,
+        "knowledge_type": knowledge_type,
+        "knowledge_detail": knowledge_detail,
+        "stage": stage,
+        "ability_tags": ability_tags,
+        "method_tags": method_tags,
+        "error_tags": error_tags,
         "weak_knowledge_candidates": weak_knowledge_candidates,
         "weak_ability_candidates": weak_ability_candidates,
         "raw": {
             "core": core_raw,
             "knowledges": knowledges_raw,
             "error_analysis": error_analysis_raw,
+            "subject": subject_raw,
             "weak_points": weak_points_raw,
             "classification": classification_raw,
         },
@@ -652,6 +769,9 @@ def read_student_profile_tool(student_id: str) -> str:
 @tool("update_student_profile", parse_docstring=True)
 def update_student_profile_tool(
     student_id: str,
+    student_name: str | None = None,
+    grade: str | None = None,
+    subject: str | None = None,
     weak_knowledge: list[str] | None = None,
     weak_ability: list[str] | None = None,
     preferences: list[str] | None = None,
@@ -661,6 +781,9 @@ def update_student_profile_tool(
 
     Args:
         student_id: Student identifier provided by the caller.
+        student_name: Optional student name for the profile.
+        grade: Optional student grade for the profile.
+        subject: Optional primary subject for the profile.
         weak_knowledge: Weak knowledge points to summarize into the profile.
         weak_ability: Weak ability points to summarize into the profile.
         preferences: Learning preferences or tutoring preferences.
@@ -668,6 +791,9 @@ def update_student_profile_tool(
     """
     path = update_student_profile_manual(
         student_id,
+        student_name=student_name,
+        grade=grade,
+        subject=subject,
         weak_knowledge=weak_knowledge,
         weak_ability=weak_ability,
         preferences=preferences,
@@ -696,14 +822,61 @@ async def recommend_similar_problems_tool(
     question: str,
     student_id: str | None = None,
     knowledges: list[str] | None = None,
+    subject: str | None = None,
+    difficulty: str | None = None,
+    knowledge_type: str | None = None,
+    knowledge_detail: str | None = None,
+    grade: str | None = None,
+    stage: str | None = None,
+    ability_tags: list[str] | None = None,
+    method_tags: list[str] | None = None,
+    error_tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Recommend similar problems via DeerFlow's configured chat model.
+    """Recommend similar problems via the structured problem bank first, then DeerFlow's configured chat model.
 
     Args:
         question: The current problem or topic text.
         student_id: Optional student identifier for personalized retrieval.
         knowledges: Optional knowledge tags to bias retrieval.
+        subject: Optional subject hint for bank retrieval.
+        difficulty: Optional difficulty hint for bank retrieval.
+        knowledge_type: Optional coarse-grained knowledge category.
+        knowledge_detail: Optional fine-grained knowledge detail.
+        grade: Optional grade hint for global bank retrieval.
+        stage: Optional stage hint, one of 小学/初中/高中.
+        ability_tags: Optional controlled ability tags.
+        method_tags: Optional controlled solution-method tags.
+        error_tags: Optional controlled common-error tags.
     """
+    try:
+        bank_items = await asyncio.to_thread(
+            retrieve_similar_problems,
+            question=question,
+            student_id=student_id,
+            subject=subject,
+            knowledges=knowledges,
+            difficulty=difficulty,
+            knowledge_type=knowledge_type,
+            knowledge_detail=knowledge_detail,
+            grade=grade,
+            stage=stage,
+            ability_tags=ability_tags,
+            method_tags=method_tags,
+            error_tags=error_tags,
+            limit=3,
+        )
+    except Exception as exc:
+        logger.warning("recommend_similar_problems bank retrieval failed: %s", exc)
+        bank_items = []
+
+    if bank_items:
+        return {
+            "status": "ok",
+            "items": [_build_recommendation_item(item) for item in bank_items],
+            "message": "已优先从题库中挑选同类题目。",
+            "raw": {"source": "problem_bank", "items": bank_items},
+        }
+
     model_name = _get_teacher_model_name(_RECOMMEND_MODEL_ENV)
     try:
         payload_data, raw_text = await _invoke_json_tool(

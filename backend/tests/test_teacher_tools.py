@@ -57,15 +57,26 @@ def test_extract_json_object_handles_fenced_json():
     assert payload == {"answer": "42"}
 
 
+def test_solve_classification_system_instruction_includes_fixed_taxonomy():
+    instruction = teacher_tools._solve_classification_system_instruction()
+
+    assert "You must choose knowledge_type and knowledge_detail from the following fixed Chinese taxonomy." in instruction
+    assert "函数" in instruction
+    assert "函数的单调性" in instruction
+    assert "解析几何" in instruction
+    assert "椭圆" in instruction
+
+
 @pytest.mark.anyio
 async def test_solve_problem_tool_returns_structured_result(monkeypatch):
     factory = SequenceModelFactory(
         [
             '{"answer":"42","steps":["step 1"],"explanation":"done"}',
-            '{"knowledges":["algebra"]}',
+            '{"knowledges":["函数的单调性"]}',
             '{"error_analysis":null}',
+            '{"subject":"数学"}',
             '{"weak_knowledge_candidates":["equation"],"weak_ability_candidates":["careless calculation"]}',
-            '{"problem_type":"equation","difficulty":"easy"}',
+            '{"problem_type":"大题","difficulty":"简单","knowledge_type":"函数","knowledge_detail":"函数的单调性","stage":"高中","ability_tags":["数形结合"],"method_tags":["构造函数"],"error_tags":["公式误用"]}',
         ]
     )
     monkeypatch.setattr(teacher_tools, "create_chat_model", factory)
@@ -77,19 +88,27 @@ async def test_solve_problem_tool_returns_structured_result(monkeypatch):
     assert result["answer"] == "42"
     assert result["steps"] == ["step 1"]
     assert result["explanation"] == "done"
-    assert result["knowledges"] == ["algebra"]
+    assert result["knowledges"] == ["函数的单调性"]
     assert result["error_analysis"] is None
-    assert result["problem_type"] == "equation"
-    assert result["difficulty"] == "easy"
+    assert result["problem_type"] == "大题"
+    assert result["difficulty"] == "简单"
+    assert result["knowledge_type"] == "函数"
+    assert result["knowledge_detail"] == "函数的单调性"
+    assert result["stage"] == "高中"
+    assert result["ability_tags"] == ["数形结合"]
+    assert result["method_tags"] == ["构造函数"]
+    assert result["error_tags"] == ["公式误用"]
     assert result["weak_knowledge_candidates"] == ["equation"]
     assert result["weak_ability_candidates"] == ["careless calculation"]
     assert result["raw"]["core"] == {"answer": "42", "steps": ["step 1"], "explanation": "done"}
-    assert result["raw"]["knowledges"] == {"knowledges": ["algebra"]}
+    assert result["raw"]["knowledges"] == {"knowledges": ["函数的单调性"]}
     assert result["raw"]["weak_points"] == {
         "weak_knowledge_candidates": ["equation"],
         "weak_ability_candidates": ["careless calculation"],
     }
-    assert result["raw"]["classification"] == {"problem_type": "equation", "difficulty": "easy"}
+    assert result["raw"]["classification"]["problem_type"] == "大题"
+    assert result["raw"]["classification"]["knowledge_detail"] == "函数的单调性"
+    assert result["raw"]["classification"]["ability_tags"] == ["数形结合"]
     assert result["persistence"]["problem_id"] == 1
     assert result["persistence"]["problem_detail_id"] == "abc"
 
@@ -99,10 +118,11 @@ async def test_solve_problem_tool_passes_basic_record_fields_to_persistence(monk
     factory = SequenceModelFactory(
         [
             '{"answer":"42","steps":["step 1"],"explanation":"done"}',
-            '{"knowledges":["algebra"]}',
+            '{"knowledges":["函数的单调性"]}',
             '{"error_analysis":null}',
+            '{"subject":"数学"}',
             '{"weak_knowledge_candidates":["equation"],"weak_ability_candidates":["careless calculation"]}',
-            '{"problem_type":"equation","difficulty":"easy"}',
+            '{"problem_type":"大题","difficulty":"简单","knowledge_type":"函数","knowledge_detail":"函数的单调性","stage":"高中","ability_tags":["数形结合"],"method_tags":["构造函数"],"error_tags":["公式误用"]}',
         ]
     )
     captured = {}
@@ -119,7 +139,7 @@ async def test_solve_problem_tool_passes_basic_record_fields_to_persistence(monk
             "question": "1+1?",
             "student_id": "stu-1",
             "image_url": "https://example.com/problem.png",
-            "subject": "math",
+            "subject": "数学",
             "grade": "grade-1",
         }
     )
@@ -127,11 +147,13 @@ async def test_solve_problem_tool_passes_basic_record_fields_to_persistence(monk
     assert captured["question"] == "1+1?"
     assert captured["student_id"] == "stu-1"
     assert captured["image_url"] == "https://example.com/problem.png"
-    assert captured["subject"] == "math"
+    assert captured["subject"] == "数学"
     assert captured["grade"] == "grade-1"
     assert captured["result"]["answer"] == "42"
-    assert captured["result"]["problem_type"] == "equation"
-    assert captured["result"]["difficulty"] == "easy"
+    assert captured["result"]["problem_type"] == "大题"
+    assert captured["result"]["difficulty"] == "简单"
+    assert captured["result"]["knowledge_type"] == "函数"
+    assert captured["result"]["knowledge_detail"] == "函数的单调性"
 
 
 @pytest.mark.anyio
@@ -141,23 +163,72 @@ async def test_solve_problem_tool_logs_structured_fields(monkeypatch, caplog):
             '{"answer":"42","steps":["step 1"],"explanation":"done"}',
             '{"knowledges":["algebra"]}',
             '{"error_analysis":"sign mistake"}',
+            '{"subject":"数学"}',
             '{"weak_knowledge_candidates":["equation"],"weak_ability_candidates":["careless calculation"]}',
-            '{"problem_type":"equation","difficulty":"easy"}',
+            '{"problem_type":"大题","difficulty":"简单"}',
         ]
     )
     monkeypatch.setattr(teacher_tools, "create_chat_model", factory)
     monkeypatch.setattr(teacher_tools, "persist_safely_async", fake_persist_none)
 
     with caplog.at_level("INFO"):
-        await teacher_tools.solve_problem_tool.ainvoke({"question": "1+1?", "student_id": "stu-1", "subject": "math", "grade": "grade-7"})
+        await teacher_tools.solve_problem_tool.ainvoke({"question": "1+1?", "student_id": "stu-1", "subject": "数学", "grade": "grade-7"})
 
     assert "solve_problem generated result" in caplog.text
     assert 'answer=' in caplog.text
     assert 'steps=["step 1"]' in caplog.text
-    assert 'knowledges=["algebra"]' in caplog.text
+    assert 'knowledges=[]' in caplog.text
     assert "sign mistake" in caplog.text
     assert 'weak_knowledge_candidates=["equation"]' in caplog.text
     assert 'weak_ability_candidates=["careless calculation"]' in caplog.text
+
+
+@pytest.mark.anyio
+async def test_solve_problem_tool_normalizes_english_knowledges_to_fixed_chinese_taxonomy(monkeypatch):
+    factory = SequenceModelFactory(
+        [
+            '{"answer":"42","steps":["step 1"],"explanation":"done"}',
+            '{"knowledges":["monotonicity","函数单调综合"]}',
+            '{"error_analysis":null}',
+            '{"subject":"math"}',
+            '{"weak_knowledge_candidates":[],"weak_ability_candidates":[]}',
+            '{"problem_type":"大题","difficulty":"easy","knowledge_type":"function","knowledge_detail":"单调"}',
+        ]
+    )
+    monkeypatch.setattr(teacher_tools, "create_chat_model", factory)
+    monkeypatch.setattr(teacher_tools, "persist_safely_async", fake_persist_none)
+
+    result = await teacher_tools.solve_problem_tool.ainvoke({"question": "1+1?"})
+
+    assert result["knowledge_type"] == "函数"
+    assert result["knowledge_detail"] == "函数的单调性"
+    assert result["knowledges"] == ["函数的单调性"]
+
+
+@pytest.mark.anyio
+async def test_solve_problem_tool_infers_subject_when_missing(monkeypatch):
+    factory = SequenceModelFactory(
+        [
+            '{"answer":"42","steps":["step 1"],"explanation":"done"}',
+            '{"knowledges":["函数的单调性"]}',
+            '{"error_analysis":null}',
+            '{"subject":"math"}',
+            '{"weak_knowledge_candidates":[],"weak_ability_candidates":[]}',
+            '{"problem_type":"大题","difficulty":"简单","knowledge_type":"函数","knowledge_detail":"函数的单调性","stage":"高中","ability_tags":["数形结合"],"method_tags":["构造函数"],"error_tags":["公式误用"]}',
+        ]
+    )
+    captured = {}
+
+    async def fake_persist(**kwargs):
+        captured.update(kwargs)
+        return None, None
+
+    monkeypatch.setattr(teacher_tools, "create_chat_model", factory)
+    monkeypatch.setattr(teacher_tools, "persist_safely_async", fake_persist)
+
+    await teacher_tools.solve_problem_tool.ainvoke({"question": "解方程 x+1=2"})
+
+    assert captured["subject"] == "数学"
 
 
 @pytest.mark.anyio
@@ -187,13 +258,41 @@ async def test_solve_problem_tool_degrades_when_diagnostics_fail(monkeypatch):
     assert result["raw"]["core"] == {"answer": "42", "steps": ["step 1"], "explanation": "done"}
     assert result["raw"]["knowledges"] is None
     assert result["raw"]["error_analysis"] is None
+    assert result["raw"]["subject"] is None
     assert result["raw"]["weak_points"] is None
     assert result["raw"]["classification"] is None
     assert result["persistence_error"] == "db down"
 
 
 @pytest.mark.anyio
-async def test_recommend_similar_problems_tool_returns_items(monkeypatch):
+async def test_recommend_similar_problems_tool_prefers_problem_bank(monkeypatch):
+    monkeypatch.setattr(
+        teacher_tools,
+        "retrieve_similar_problems",
+        lambda **kwargs: [
+            {
+                "qid": 101,
+                "question": "已存题目",
+                "problem_type": "equation",
+                "knowledge_type": "函数",
+                "knowledge_detail": "函数单调性",
+                "difficulty": "easy",
+                "recommend_reason": "同考函数单调性；方法相近：构造函数",
+            }
+        ],
+    )
+
+    result = await teacher_tools.recommend_similar_problems_tool.ainvoke({"question": "x^2+2x+1=0", "subject": "数学"})
+
+    assert result["status"] == "ok"
+    assert result["raw"]["source"] == "problem_bank"
+    assert result["items"][0]["question"] == "已存题目"
+    assert result["items"][0]["similarity"] == "同考函数单调性；方法相近：构造函数"
+
+
+@pytest.mark.anyio
+async def test_recommend_similar_problems_tool_falls_back_to_model(monkeypatch):
+    monkeypatch.setattr(teacher_tools, "retrieve_similar_problems", lambda **kwargs: [])
     monkeypatch.setattr(
         teacher_tools,
         "create_chat_model",
@@ -272,6 +371,9 @@ def test_update_student_profile_tool_uses_manual_update_entry(monkeypatch, tmp_p
     result = teacher_tools.update_student_profile_tool.invoke(
         {
             "student_id": "stu-1",
+            "student_name": "Alice",
+            "grade": "grade-7",
+            "subject": "数学",
             "weak_knowledge": ["equation"],
             "weak_ability": ["checking"],
             "preferences": ["use diagrams"],
@@ -282,6 +384,9 @@ def test_update_student_profile_tool_uses_manual_update_entry(monkeypatch, tmp_p
     assert result == {"status": "ok", "path": str(target)}
     assert captured == {
         "student_id": "stu-1",
+        "student_name": "Alice",
+        "grade": "grade-7",
+        "subject": "数学",
         "weak_knowledge": ["equation"],
         "weak_ability": ["checking"],
         "preferences": ["use diagrams"],

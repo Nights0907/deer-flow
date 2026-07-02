@@ -25,7 +25,7 @@ deer-flow/
 ├── extensions_config.json      # MCP servers and skills configuration
 ├── backend/                    # Backend application (this directory)
 │   ├── Makefile               # Backend-only commands (dev, gateway, lint)
-│   ├── langgraph.json         # LangGraph server configuration
+│   ├── langgraph.fenjson         # LangGraph server configuration
 │   ├── packages/
 │   │   └── harness/           # deerflow-harness package (import: deerflow.*)
 │   │       ├── pyproject.toml
@@ -112,7 +112,7 @@ Digital teacher integration is scaffolded through:
 - global tool registration in `config.example.yaml` under the `teacher` tool group
 - custom agent config in `backend/.deer-flow/agents/digital-teacher/config.yaml`
 - custom agent persona in `backend/.deer-flow/agents/digital-teacher/SOUL.md`
-- model-backed teacher tools in `packages/harness/deerflow/tools/teacher_tools.py`; `solve_problem` now does core solving first, then concurrently enriches diagnostics (`knowledges`, `error_analysis`, `weak_*`), and finally persists generated-problem basic fields to MySQL `question_basic_info` (`qid`, `sid`, `content`, `type`, `date`, `subject`, `knowledgeType` as the first/core knowledge point), detailed payloads to MongoDB (answer, steps, explanation, knowledges plus archive metadata), plus automatically merges math-only results into the local markdown student profile through `packages/harness/deerflow/teacher_persistence.py`; persistence auto-creates the MySQL table and MongoDB indexes on write, defaults both MySQL and Mongo to enabled for local development, accepts both `DEER_FLOW_TEACHER_*` env names and common fallback names (`MYSQL_*`, `MONGODB_*`, `MONGO_*`), and now writes `qid` explicitly as the current system-time millisecond timestamp so existing local tables without `AUTO_INCREMENT` on `qid` still work; `packages/harness/deerflow/teacher_profile.py` now parses legacy profile markdown, renders canonical cumulative markdown, keeps manual preferences separate from automatic observations, stores only the most recent 8 sessions / top 10 weak items, and adds derived `Math Archive Summary` / `Archived Math Problems` sections for fully automatic math archive updates; `evaluate_student_explanation` provides structured Feynman-style explanation assessment
+- model-backed teacher tools in `packages/harness/deerflow/tools/teacher_tools.py`; `solve_problem` now does core solving first, then concurrently enriches diagnostics (`knowledges`, `error_analysis`, `weak_*`) and controlled teaching metadata (`stage`, `ability_tags`, `method_tags`, `error_tags`), and finally persists generated-problem basic fields to MySQL `question_basic_info` for structured global problem-bank retrieval, detailed payloads to MongoDB (answer, steps, explanation, normalized tags, common mistakes, solution methods, raw tags, and archive metadata), plus automatically merges math-only results into the local markdown student profile through `packages/harness/deerflow/teacher_persistence.py`; persistence auto-creates the MySQL table and MongoDB indexes on write, defaults both MySQL and Mongo to enabled for local development, accepts both `DEER_FLOW_TEACHER_*` env names and common fallback names (`MYSQL_*`, `MONGODB_*`, `MONGO_*`), and writes `qid` explicitly as the current system-time millisecond timestamp so existing local tables without `AUTO_INCREMENT` on `qid` still work; `recommend_similar_problems` uses global structured retrieval and metadata reranking first, with `student_id` only as a personalization boost rather than a hard filter; `packages/harness/deerflow/teacher_profile.py` now parses legacy profile markdown, renders canonical cumulative markdown, keeps manual preferences separate from automatic observations, and stores only the most recent 8 sessions / top 10 weak items; `evaluate_student_explanation` provides structured Feynman-style explanation assessment
 - local mirrored student profile markdown files in `backend/.deer-flow/students/{student_id}/PROFILE.md`, now maintained as structured cumulative markdown
 - when `student_id` is missing, teacher persistence falls back to default sid `522025320226` so MySQL `question_basic_info.sid` remains populated
 - teaching strategy stays in the digital-teacher skills/SOUL layer: guided questioning, personalized explanation pacing, and when to use similar-problem practice or explanation evaluation
@@ -126,14 +126,27 @@ Digital teacher integration is scaffolded through:
       type VARCHAR(64) NULL,
       date DATETIME(6) NOT NULL,
       subject VARCHAR(64) NULL,
+      grade VARCHAR(64) NULL,
+      stage VARCHAR(32) NULL,
       knowledgeType TEXT NULL,
+      difficulty VARCHAR(32) NULL,
+      knowledgeDetail TEXT NULL,
+      abilityTags TEXT NULL,
+      methodTags TEXT NULL,
+      errorTags TEXT NULL,
+      qualityScore DOUBLE NULL,
+      usageCount INT NOT NULL DEFAULT 1,
+      successRate DOUBLE NULL,
+      source VARCHAR(128) NULL,
+      contentHash CHAR(64) NULL,
+      status VARCHAR(32) NULL,
       PRIMARY KEY (qid),
       KEY idx_sid_date (sid, date),
       KEY idx_subject (subject)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   ```
-  `knowledgeType` stores only the first/core item from `knowledges` as a single text value.
-- MongoDB collection expected by `packages/harness/deerflow/teacher_persistence.py`: `teacher_problem_details`, with fields `qid`, `question`, `answer`, `explanation`, `steps`, `knowledges`; recommended index is `{ qid: 1 }` unique+sparse
+  `knowledgeType` stores the normalized coarse math category (one of: 集合与常用逻辑用语, 函数, 三角函数, 数列, 不等式, 平面向量, 复数, 立体几何, 解析几何, 计数原理与概率统计, 导数与微积分初步, 推理与证明); `knowledgeDetail` stores fine-grained knowledges joined from the detailed tags; `abilityTags`, `methodTags`, and `errorTags` store JSON arrays from controlled teaching tag sets; `difficulty` stores the string difficulty label. Existing local tables are repaired in-place by adding missing structured metadata columns on write.
+- MongoDB collection expected by `packages/harness/deerflow/teacher_persistence.py`: `teacher_problem_details`, with fields `qid`, `question`, `answer`, `explanation`, `steps`, `knowledges`, normalized teaching tags, `common_mistakes`, `solution_methods`, `raw_tags`, and archive metadata; recommended index is `{ qid: 1 }` unique+sparse
 
 ## Architecture
 

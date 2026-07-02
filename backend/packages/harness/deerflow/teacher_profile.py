@@ -8,6 +8,7 @@ from deerflow.config import get_paths
 
 _MAX_WEAK_ITEMS = 10
 _MAX_RECENT_SESSIONS = 8
+_BASIC_INFO_HEADER = "## Basic Info"
 _WEAK_KNOWLEDGE_HEADER = "## Weak Knowledge"
 _WEAK_ABILITY_HEADER = "## Weak Ability"
 _PREFERENCES_HEADER = "## Learning Preferences"
@@ -64,6 +65,9 @@ def _format_datetime(value: datetime | str | None) -> str:
 def empty_student_profile(student_id: str) -> dict[str, Any]:
     return {
         "student_id": student_id,
+        "student_name": None,
+        "grade": None,
+        "subject": None,
         "weak_knowledge": [],
         "weak_ability": [],
         "preferences": [],
@@ -168,10 +172,21 @@ def parse_student_profile_markdown(student_id: str, markdown: str) -> dict[str, 
         if current_header is not None:
             sections[current_header].append(line)
 
+    basic_info_lines = sections.get(_BASIC_INFO_HEADER, [])
     weak_knowledge_lines = sections.get(_WEAK_KNOWLEDGE_HEADER, [])
     weak_ability_lines = sections.get(_WEAK_ABILITY_HEADER, [])
     recent_session_lines = sections.get(_RECENT_SESSIONS_HEADER, [])
     preference_lines = sections.get(_PREFERENCES_HEADER, [])
+
+    for line in basic_info_lines:
+        stripped = line.strip()
+        if not stripped or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        normalized_key = key.strip().lower().replace(" ", "_")
+        normalized_value = value.strip() or None
+        if normalized_key in {"student_name", "grade", "subject"}:
+            profile[normalized_key] = normalized_value
 
     profile["weak_knowledge"] = _truncate_ranked_items(_parse_ranked_section(weak_knowledge_lines))
     if not profile["weak_knowledge"] and weak_knowledge_lines:
@@ -216,6 +231,15 @@ def _truncate_recent_sessions(items: list[dict[str, Any]]) -> list[dict[str, Any
 def render_student_profile_markdown(profile: dict[str, Any]) -> str:
     student_id = profile["student_id"]
     lines = [f"# Student Profile: {student_id}", ""]
+
+    lines.append(_BASIC_INFO_HEADER)
+    if profile.get("student_name"):
+        lines.append(f"student_name: {profile['student_name']}")
+    if profile.get("grade"):
+        lines.append(f"grade: {profile['grade']}")
+    if profile.get("subject"):
+        lines.append(f"subject: {profile['subject']}")
+    lines.append("")
 
     lines.append(_WEAK_KNOWLEDGE_HEADER)
     for item in _truncate_ranked_items(profile.get("weak_knowledge") or []):
@@ -305,6 +329,9 @@ def merge_student_profile_observation(
     error_analysis: str | None = None,
 ) -> dict[str, Any]:
     merged = empty_student_profile(profile["student_id"])
+    merged["student_name"] = profile.get("student_name")
+    merged["grade"] = grade or profile.get("grade")
+    merged["subject"] = subject or profile.get("subject")
     merged["preferences"] = _normalize_items(profile.get("preferences") or [])
     seen_at = _coerce_datetime(observed_at)
     merged["weak_knowledge"] = _merge_ranked_items(profile.get("weak_knowledge") or [], weak_knowledge or [], seen_at)
@@ -363,6 +390,9 @@ def update_student_profile_from_observation(
 def update_student_profile_manual(
     student_id: str,
     *,
+    student_name: str | None = None,
+    grade: str | None = None,
+    subject: str | None = None,
     weak_knowledge: list[str] | None = None,
     weak_ability: list[str] | None = None,
     preferences: list[str] | None = None,
@@ -377,6 +407,9 @@ def update_student_profile_manual(
         weak_ability=weak_ability,
         summary=recent_summary,
     )
+    merged["student_name"] = student_name or current.get("student_name")
+    merged["grade"] = grade or current.get("grade")
+    merged["subject"] = subject or current.get("subject")
     if preferences is not None:
         merged["preferences"] = _normalize_items(preferences)
     else:
@@ -387,12 +420,18 @@ def update_student_profile_manual(
 def build_student_profile_markdown(
     student_id: str,
     *,
+    student_name: str | None = None,
+    grade: str | None = None,
+    subject: str | None = None,
     weak_knowledge: list[str] | None = None,
     weak_ability: list[str] | None = None,
     preferences: list[str] | None = None,
     recent_summary: str | None = None,
 ) -> str:
     profile = empty_student_profile(student_id)
+    profile["student_name"] = student_name
+    profile["grade"] = grade
+    profile["subject"] = subject
     if preferences is not None:
         profile["preferences"] = _normalize_items(preferences)
     profile = merge_student_profile_observation(

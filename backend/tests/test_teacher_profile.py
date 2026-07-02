@@ -38,6 +38,9 @@ def test_write_and_read_student_profile_summary(monkeypatch, tmp_path):
 def test_build_student_profile_markdown_contains_structured_sections():
     markdown = build_student_profile_markdown(
         "student-001",
+        student_name="Alice",
+        grade="grade-7",
+        subject="math",
         weak_knowledge=["quadratic equation"],
         weak_ability=["careless calculation"],
         preferences=["likes hint-first teaching"],
@@ -45,6 +48,10 @@ def test_build_student_profile_markdown_contains_structured_sections():
     )
 
     assert "# Student Profile: student-001" in markdown
+    assert "## Basic Info" in markdown
+    assert "student_name: Alice" in markdown
+    assert "grade: grade-7" in markdown
+    assert "subject: math" in markdown
     assert "## Weak Knowledge" in markdown
     assert "quadratic equation | count=1 | last_seen=" in markdown
     assert "## Weak Ability" in markdown
@@ -81,6 +88,9 @@ Needs more practice on factorization.
 def test_render_round_trip_preserves_structured_profile():
     profile = {
         "student_id": "student-001",
+        "student_name": "Alice",
+        "grade": "grade-7",
+        "subject": "math",
         "weak_knowledge": [{"name": "equation", "count": 3, "last_seen": "2026-05-07T10:00:00+00:00"}],
         "weak_ability": [{"name": "checking", "count": 2, "last_seen": "2026-05-07T09:00:00+00:00"}],
         "preferences": ["use diagrams"],
@@ -138,6 +148,9 @@ def test_update_student_profile_manual_preserves_preferences_across_auto_updates
 
     update_student_profile_manual(
         "student-001",
+        student_name="Alice",
+        grade="grade-7",
+        subject="math",
         preferences=["use diagrams", "slower pace"],
         recent_summary="manual note",
     )
@@ -152,6 +165,9 @@ def test_update_student_profile_manual_preserves_preferences_across_auto_updates
 
     profile = parse_student_profile_markdown("student-001", read_student_profile_summary("student-001"))
 
+    assert profile["student_name"] == "Alice"
+    assert profile["grade"] == "grade-7"
+    assert profile["subject"] == "math"
     assert profile["preferences"] == ["use diagrams", "slower pace"]
     summaries = {session["summary"] for session in profile["recent_sessions"]}
     assert summaries == {"auto note", "manual note"}
@@ -170,8 +186,8 @@ def test_update_student_profile_from_observation_keeps_l0_profile_only(monkeypat
         weak_knowledge=["equation application"],
         weak_ability=["checking"],
         summary="auto note",
-        problem_type="equation",
-        difficulty="medium",
+        problem_type="大题",
+        difficulty="中等",
         error_analysis="sign mistake",
     )
 
